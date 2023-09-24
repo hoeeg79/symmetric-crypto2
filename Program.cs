@@ -10,14 +10,15 @@ namespace MyApp // Note: actual namespace depends on the project name.
         static string Message;
         private static bool Continue;
         static string docPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        
-        // generate a key
-        static byte[] key;
+        private static byte[] Key;
+        private static int NonceSizeInBytes = 12; // Adjust the nonce size as needed
+        private static int TagSizeInBytes = 16;   // Fixed tag size of 128 bits (16 bytes)
+
         
         static void Main(string[] args)
         {
             Continue = true;
-            IntroScreen();
+            GenerateKey();
             while (Continue)
             {
                 writeMenu();
@@ -25,40 +26,79 @@ namespace MyApp // Note: actual namespace depends on the project name.
             }
         }
 
-        private static string encrypt(string passphrase, int choice)
+        private static string EncryptMessage(string message, byte[] key)
         {
-            using var aes = new AesGcm(key);
-
-            var nonce = new byte[AesGcm.NonceByteSizes.MaxSize]; // MaxSize = 12
-            RandomNumberGenerator.Fill(nonce);
-
-            var plaintextBytes = Encoding.UTF8.GetBytes(passphrase);
-            var ciphertext = new byte[plaintextBytes.Length];
-            var tag = new byte[AesGcm.TagByteSizes.MaxSize];
-
-            aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
-
-            string b64String = Convert.ToBase64String(ciphertext);
-
-            if (choice == 1)
+            // initialization of AES-GCM to encrypt data
+            using (AesGcm aesGcm = new AesGcm(key))
             {
-                return b64String;
-            }
+                // Generate nonce
+                byte[] nonce = new byte[NonceSizeInBytes];
+                RandomNumberGenerator.Fill(nonce);
 
-            if (choice == 3)
-            {
-                using (var aes2 = new AesGcm(key))
-                {
-                    plaintextBytes = new byte[ciphertext.Length];
-                    aes2.Decrypt(nonce, ciphertext, tag, plaintextBytes);
-                    return Encoding.UTF8.GetString(plaintextBytes);
-                }
-            }
+                // Convert message to byte array - preparing it for encryption
+                byte[] plaintextBytes = Encoding.UTF8.GetBytes(message);
+                // Cipher byte array created as the same size as the message array above.
+                // Used for storing the encrypted message
+                byte[] ciphertextBytes = new byte[plaintextBytes.Length];
+                // Fixed tag size
+                byte[] tag = new byte[TagSizeInBytes];
+                
+                // Magic happens. After this line, the ciphertextBytes and tag variable will contain
+                // the encrypted message, and authentication tag.
+                aesGcm.Encrypt(nonce, plaintextBytes, ciphertextBytes, tag);
 
-            return null;
+                // new byte array to store the encrypted message, it will contain all needed to decrypt, except the key.
+                byte[] encryptedMessage = new byte[NonceSizeInBytes + ciphertextBytes.Length + TagSizeInBytes];
+                
+                // inserts nonce
+                nonce.CopyTo(encryptedMessage, 0);
+                // inserts ciphertext
+                ciphertextBytes.CopyTo(encryptedMessage, NonceSizeInBytes);
+                //inserts authentication tag
+                tag.CopyTo(encryptedMessage, NonceSizeInBytes + ciphertextBytes.Length);
+
+                // return a base64 String of the byte-array containing nonce, cipher and tag.
+                return Convert.ToBase64String(encryptedMessage);
+            }
         }
 
+        private static string DecryptMessage(string encryptedMessage, byte[] key)
+        {
+            // initialization of AES-GCM to encrypt data
+            using (AesGcm aesGcm = new AesGcm(key))
+            {
+                // converts the encrypted string to a byte array - preparing for decryption
+                byte[] encryptedBytes = Convert.FromBase64String(encryptedMessage);
 
+                // Checks recieved message is at least the size of nonce + tag
+                if (encryptedBytes.Length < NonceSizeInBytes + TagSizeInBytes)
+                {
+                    throw new ArgumentException("Invalid encrypted message format");
+                }
+
+                // arrays to store nonce, tag and ciphertext.
+                byte[] nonce = new byte[NonceSizeInBytes];
+                byte[] tag = new byte[TagSizeInBytes];
+                byte[] ciphertextBytes = new byte[encryptedBytes.Length - NonceSizeInBytes - TagSizeInBytes];
+
+                // extracting nonce from the encrypted message array
+                Array.Copy(encryptedBytes, nonce, NonceSizeInBytes);
+                // extracting ciphertext from encrypted message array
+                Array.Copy(encryptedBytes, NonceSizeInBytes, ciphertextBytes, 0, ciphertextBytes.Length);
+                // extracting tag from encrypted message array
+                Array.Copy(encryptedBytes, NonceSizeInBytes + ciphertextBytes.Length, tag, 0, TagSizeInBytes);
+
+                // array to store the decrypted message
+                byte[] plaintextBytes = new byte[ciphertextBytes.Length];
+                
+                // magic happens, using the nonce, ciphertext and tag, the original message is inserted
+                // into the byte array created above
+                aesGcm.Decrypt(nonce, ciphertextBytes, tag, plaintextBytes);
+
+                // converting byte array to string
+                return Encoding.UTF8.GetString(plaintextBytes);
+            }
+        }
 
         private static void writeMenu()
         {
@@ -78,15 +118,15 @@ namespace MyApp // Note: actual namespace depends on the project name.
             {
                 if (typed == 1)
                 {
-                    encryptMessage();
+                    SaveToFile();
                 } 
-                else if (typed == 2 && typed != null)
+                else if (typed == 2)
                 {
                     printEncryptedMessage();
                 }
-                else if (typed == 3 && typed != null)
+                else if (typed == 3)
                 {
-                    printDecryptedMessage();
+                    PrintDecryptedMessage();
                 }
                 else
                 {
@@ -95,26 +135,28 @@ namespace MyApp // Note: actual namespace depends on the project name.
             }
         }
 
-        private static void printDecryptedMessage()
-        {
-            using (StreamReader file = new StreamReader(Path.Combine(docPath.ToString(), "encryptedMessage.txt")))
-            {
-                string output = encrypt(file.ReadLine(), 3);
-                Console.WriteLine(output);
-            }
-        }
-
-        private static void encryptMessage()
+        private static void SaveToFile()
         {
             Console.Write("Type a message to encrypt: ");
-            string input = Console.ReadLine();
+            string input = Console.ReadLine()!;
 
-            string encrypted = encrypt(input, 1);
+            string encrypted = EncryptMessage(input, Key);
 
             using (StreamWriter outputFile = new StreamWriter(Path.Combine(docPath, "encryptedMessage.txt")))
             {
                 
                 outputFile.WriteLine(encrypted);
+            }
+        }
+
+        private static void PrintDecryptedMessage()
+        {
+            using (StreamReader file = new StreamReader(Path.Combine(docPath.ToString(), "encryptedMessage.txt")))
+            {
+                string input = file.ReadLine()!;
+                
+                string output = DecryptMessage(input, Key);
+                Console.WriteLine(output);
             }
         }
 
@@ -126,7 +168,7 @@ namespace MyApp // Note: actual namespace depends on the project name.
             }
         }
 
-        private static void IntroScreen()
+        private static void GenerateKey()
         {
             Console.Write("Type a passphrase: ");
             
@@ -136,7 +178,7 @@ namespace MyApp // Note: actual namespace depends on the project name.
 
             using (var deriveBytes = new Rfc2898DeriveBytes(Console.ReadLine(), salt, iterations))
             {
-                key = deriveBytes.GetBytes(32); // Generate a 32-byte key
+                Key = deriveBytes.GetBytes(32); // Generate a 32-byte key
             }
         }
     }
